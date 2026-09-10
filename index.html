@@ -1841,36 +1841,211 @@ function exportData() {
   URL.revokeObjectURL(url);
   toast('Backup exported');
 }
+/* ---- Import with Replace / Merge choice ---- */
+let pendingImport = null;
+let pendingMerge = null;
+
+function normalizeImport(d) {
+  const out = Object.assign(defaultState(), d);
+  ['categories','checklists','party','quests','trainings','shop'].forEach(k => {
+    if (!Array.isArray(out[k])) out[k] = [];
+  });
+  out.gems = Number(out.gems) || 0;
+  out.settings = Object.assign({ questTarget:'even', trainingTarget:'even' }, out.settings || {});
+  return out;
+}
+
+const lc = s => String(s || '').trim().toLowerCase();
+const keyOf = {
+  party:      m  => lc(m.name),
+  quests:     q  => (q.kind || 'main') + '|' + lc(q.title),
+  trainings:  h  => lc(h.name),
+  shop:       s  => lc(s.name),
+  categories: c  => lc(c.name),
+  checklists: c  => lc(c.name),
+  named:      x  => lc(x.name)
+};
+
+/* Match on id first (same item that travelled between devices),
+   then on name/title (same thing created independently on two devices). */
+function findMatch(arr, item, keyFn) {
+  const byId = arr.find(x => x.id === item.id);
+  if (byId) return byId;
+  const k = keyFn(item);
+  if (!k) return null;
+  return arr.find(x => keyFn(x) === k) || null;
+}
+
+/* Builds a merged copy without touching appState, plus a report of what changed.
+   Rule: local always wins on conflicts; only genuinely absent things get added. */
+function computeMerge(inc) {
+  const t = JSON.parse(JSON.stringify(appState));
+  const r = { party:0, quests:0, trainings:0, shop:0, categories:0, subcats:0,
+              attrs:0, entries:0, saved:0, checklists:0, chkItems:0, logDays:0,
+              gemsBefore: t.gems || 0, gemsAfter: 0 };
+  const clone = o => JSON.parse(JSON.stringify(o));
+
+  [['party', keyOf.party], ['quests', keyOf.quests], ['shop', keyOf.shop]].forEach(([k, kf]) => {
+    (inc[k] || []).forEach(item => {
+      if (!findMatch(t[k], item, kf)) { t[k].push(clone(item)); r[k]++; }
+    });
+  });
+
+  (inc.trainings || []).forEach(h => {
+    const mine = findMatch(t.trainings, h, keyOf.trainings);
+    if (!mine) { t.trainings.push(clone(h)); r.trainings++; return; }
+    mine.log = mine.log || {};
+    Object.keys(h.log || {}).forEach(d => {
+      if (h.log[d] && !mine.log[d]) { mine.log[d] = true; r.logDays++; }
+    });
+  });
+
+  (inc.checklists || []).forEach(cl => {
+    const mine = findMatch(t.checklists, cl, keyOf.checklists);
+    if (!mine) { t.checklists.push(clone(cl)); r.checklists++; return; }
+    mine.items = mine.items || [];
+    (cl.items || []).forEach(it => {
+      const has = mine.items.some(x => x.id === it.id || lc(x.text) === lc(it.text));
+      if (!has) { mine.items.push({ id: uid(), text: it.text, done: false }); r.chkItems++; }
+    });
+    mine.completions = Math.max(mine.completions || 0, cl.completions || 0);
+  });
+
+  (inc.categories || []).forEach(cat => {
+    const mine = findMatch(t.categories, cat, keyOf.categories);
+    if (!mine) { t.categories.push(clone(cat)); r.categories++; return; }
+    mine.subcategories = mine.subcategories || [];
+    (cat.subcategories || []).forEach(sub => {
+      const msub = findMatch(mine.subcategories, sub, keyOf.named);
+      if (!msub) { mine.subcategories.push(clone(sub)); r.subcats++; return; }
+      msub.attributes = msub.attributes || [];
+      (sub.attributes || []).forEach(a => {
+        const ma = findMatch(msub.attributes, a, keyOf.named);
+        if (!ma) { msub.attributes.push(clone(a)); r.attrs++; return; }
+        ma.entries = ma.entries || [];
+        (a.entries || []).forEach(en => {
+          if (!ma.entries.some(x => lc(x.value) === lc(en.value))) { ma.entries.push(clone(en)); r.entries++; }
+        });
+      });
+      msub.savedResults = msub.savedResults || [];
+      (sub.savedResults || []).forEach(sr => {
+        if (!msub.savedResults.some(x => x.id === sr.id || x.label === sr.label)) {
+          msub.savedResults.push(clone(sr)); r.saved++;
+        }
+      });
+    });
+  });
+
+  t.gems = Math.max(t.gems || 0, inc.gems || 0);
+  r.gemsAfter = t.gems;
+  t.settings = clone(appState.settings);
+  t.activeTab = appState.activeTab;
+  return { state: t, report: r };
+}
+
 function importData(e) {
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = ev => {
-    try {
-      const data = migrate(JSON.parse(ev.target.result));
-      const base = defaultState();
-      appState = Object.assign(base, data);
-      appState.categories = Array.isArray(appState.categories) ? appState.categories : [];
-      appState.checklists = Array.isArray(appState.checklists) ? appState.checklists : [];
-      appState.party      = Array.isArray(appState.party)      ? appState.party      : [];
-      appState.quests     = Array.isArray(appState.quests)     ? appState.quests     : [];
-      appState.trainings  = Array.isArray(appState.trainings)  ? appState.trainings  : [];
-      appState.shop       = Array.isArray(appState.shop)       ? appState.shop       : [];
-      appState.gems       = Number(appState.gems) || 0;
-      appState.settings   = Object.assign({ questTarget: 'even', trainingTarget: 'even' }, appState.settings || {});
-      if (appState.activeTab &&
-          ((appState.activeTab.startsWith('cat_') && !appState.categories.find(c => 'cat_' + c.id === appState.activeTab)) ||
-           (appState.activeTab.startsWith('chk_') && !appState.checklists.find(c => 'chk_' + c.id === appState.activeTab)))) {
-        appState.activeTab = 'party';
-      }
-      save(); render();
-      toast(`Import successful — ${appState.quests.length} quests, ${appState.trainings.length} trainings, ${appState.party.length} members`);
-    } catch(err) { toast('Invalid JSON file', 'err'); }
-    finally { e.target.value = ''; }
+    let data;
+    try { data = migrate(JSON.parse(ev.target.result)); }
+    catch (err) { toast('Invalid JSON file', 'err'); e.target.value = ''; return; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      toast('That file does not look like a backup', 'err'); e.target.value = ''; return;
+    }
+    pendingImport = normalizeImport(data);
+    pendingMerge = computeMerge(pendingImport);
+    const nm = file.name;
+    e.target.value = '';
+    openImportChoice(nm);
   };
   reader.readAsText(file);
 }
 
+function openImportChoice(fileName) {
+  const inc = pendingImport, r = pendingMerge.report;
+  const row = (label, mine, theirs, add) => `
+    <div class="grid grid-cols-4 gap-2 border-b border-slate-700 py-1">
+      <span class="text-slate-400">${label}</span>
+      <span class="text-center">${mine}</span>
+      <span class="text-center">${theirs}</span>
+      <span class="text-center ${add ? 'text-emerald-400 font-bold' : 'text-slate-600'}">${add ? '+' + add : '—'}</span>
+    </div>`;
+  const extras = [
+    r.logDays  ? `${r.logDays} training log day${r.logDays===1?'':'s'}` : '',
+    r.chkItems ? `${r.chkItems} checklist item${r.chkItems===1?'':'s'}` : '',
+    r.entries  ? `${r.entries} generator entr${r.entries===1?'y':'ies'}` : '',
+    r.subcats  ? `${r.subcats} subcategor${r.subcats===1?'y':'ies'}` : '',
+    r.attrs    ? `${r.attrs} attribute${r.attrs===1?'':'s'}` : '',
+    r.saved    ? `${r.saved} saved result${r.saved===1?'':'s'}` : ''
+  ].filter(Boolean);
+  openModal(`
+    <h3 class="text-xl font-bold mb-1"><i class="fa-solid fa-upload"></i> Import ${escapeHtml(fileName)}</h3>
+    <p class="text-xs text-slate-400 mb-4">Choose how to apply this file. There is no undo, so keep the backup box ticked unless you are sure.</p>
+    <div class="text-sm mb-4">
+      <div class="grid grid-cols-4 gap-2 text-xs text-slate-500 font-bold border-b border-slate-600 pb-1">
+        <span></span><span class="text-center">On this device</span><span class="text-center">In file</span><span class="text-center">Merge adds</span>
+      </div>
+      ${row('Party',      appState.party.length,      inc.party.length,      r.party)}
+      ${row('Quests',     appState.quests.length,     inc.quests.length,     r.quests)}
+      ${row('Trainings',  appState.trainings.length,  inc.trainings.length,  r.trainings)}
+      ${row('Shop items', appState.shop.length,       inc.shop.length,       r.shop)}
+      ${row('Checklists', appState.checklists.length, inc.checklists.length, r.checklists)}
+      ${row('Categories', appState.categories.length, inc.categories.length, r.categories)}
+      ${row('Gems',       appState.gems || 0,         inc.gems || 0,         0)}
+    </div>
+    ${extras.length ? `<p class="text-xs text-emerald-300 mb-3">Merge would also add: ${extras.join(', ')}.</p>` : ''}
+    <label class="flex items-center gap-2 text-xs text-slate-300 mb-4">
+      <input type="checkbox" id="impBackup" checked> Download a backup of my current data first
+    </label>
+    <div class="space-y-2">
+      <button onclick="applyImport('merge')" class="w-full bg-emerald-600 hover:bg-emerald-500 rounded p-3 text-left">
+        <div class="font-bold"><i class="fa-solid fa-object-group"></i> Merge — add only what's missing</div>
+        <div class="text-xs text-emerald-100 mt-1">Keeps everything already here. Anything in the file that this device doesn't have gets added. On a conflict, your local version wins. Training calendars are combined, so ticks from both devices survive.</div>
+      </button>
+      <button onclick="applyImport('replace')" class="w-full bg-rose-600 hover:bg-rose-500 rounded p-3 text-left">
+        <div class="font-bold"><i class="fa-solid fa-triangle-exclamation"></i> Replace — wipe and use the file</div>
+        <div class="text-xs text-rose-100 mt-1">Discards everything currently on this device, including anything not in the file. This is the old behaviour.</div>
+      </button>
+      <button onclick="pendingImport=null;pendingMerge=null;closeModal()" class="w-full bg-slate-600 hover:bg-slate-500 rounded p-2 text-sm">Cancel</button>
+    </div>`);
+}
+
+function applyImport(mode) {
+  if (!pendingImport) return;
+  const cb = document.getElementById('impBackup');
+  if (cb && cb.checked) exportData();
+
+  if (mode === 'replace') {
+    const inc = pendingImport;
+    appState = inc;
+    if (appState.activeTab &&
+        ((appState.activeTab.startsWith('cat_') && !appState.categories.find(c => 'cat_' + c.id === appState.activeTab)) ||
+         (appState.activeTab.startsWith('chk_') && !appState.checklists.find(c => 'chk_' + c.id === appState.activeTab)))) {
+      appState.activeTab = 'party';
+    }
+    save(); closeModal(); render();
+    toast(`Replaced — ${appState.quests.length} quests, ${appState.trainings.length} trainings, ${appState.party.length} members`, 'info');
+  } else {
+    const { state, report } = pendingMerge;
+    appState = state;
+    save(); closeModal(); render();
+    const bits = [
+      report.party      ? `${report.party} member${report.party===1?'':'s'}` : '',
+      report.quests     ? `${report.quests} quest${report.quests===1?'':'s'}` : '',
+      report.trainings  ? `${report.trainings} training${report.trainings===1?'':'s'}` : '',
+      report.shop       ? `${report.shop} shop item${report.shop===1?'':'s'}` : '',
+      report.checklists ? `${report.checklists} checklist${report.checklists===1?'':'s'}` : '',
+      report.categories ? `${report.categories} categor${report.categories===1?'y':'ies'}` : '',
+      report.chkItems   ? `${report.chkItems} checklist item${report.chkItems===1?'':'s'}` : '',
+      report.logDays    ? `${report.logDays} log day${report.logDays===1?'':'s'}` : '',
+      report.entries    ? `${report.entries} entr${report.entries===1?'y':'ies'}` : ''
+    ].filter(Boolean);
+    toast(bits.length ? `Merged — added ${bits.join(', ')}` : 'Merged — nothing new to add');
+  }
+  pendingImport = null; pendingMerge = null;
+}
 /* ===== BOOT ===== */
 render();
 </script>
