@@ -32,6 +32,14 @@
   .toast.err { background: #7f1d1d; border-color: #ef4444; color: #fef2f2; }
   .toast.info { background: #1e3a8a; border-color: #6366f1; color: #eef2ff; }
   .prio-sel { border: none; outline: none; appearance: none; -webkit-appearance: none; text-align: center; cursor: pointer; }
+  body { overflow-x: hidden; }
+  .prio-sel { max-width: 92px; }
+  @media (max-width: 640px) {
+    .cal-cell { min-height: 56px; }
+    #toastWrap { left: 12px; right: 12px; bottom: 12px; align-items: stretch; }
+    .toast { max-width: none; }
+  }
+
 </style>
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen pb-24">
@@ -155,6 +163,24 @@ function addXpToMember(m, amount) {
   while (m.xp >= xpForLevel(m.level)) { m.xp -= xpForLevel(m.level); m.level++; }
 }
 function grantGems(amount) { if (!amount) return; appState.gems = (appState.gems || 0) + amount; }
+/* ===== DEFAULT REWARDS BY CATEGORY ===== */
+const QUEST_DEFAULT_REWARD = {
+  side:      { xp: 50,  gems: 50  },
+  recurring: { xp: 100, gems: 100 },
+  main:      { xp: 500, gems: 500 }
+};
+function defaultReward(kind) {
+  return QUEST_DEFAULT_REWARD[kind] || QUEST_DEFAULT_REWARD.side;
+}
+let nqXpTouched = false, nqGemsTouched = false;
+function syncQuestRewardDefaults() {
+  const kindEl = document.getElementById('nqKind');
+  if (!kindEl) return;
+  const r = defaultReward(kindEl.value);
+  const xpEl = document.getElementById('nqXp'), gemEl = document.getElementById('nqGems');
+  if (xpEl)  { if (!nqXpTouched)   xpEl.value  = r.xp;   xpEl.placeholder  = r.xp; }
+  if (gemEl) { if (!nqGemsTouched) gemEl.value = r.gems; gemEl.placeholder = r.gems; }
+}
 
 /* ===== PRIORITY ===== */
 const PRIORITY_LEVELS = [
@@ -430,36 +456,50 @@ function viewQuests() {
     .sort((a, b) => String(a.nextDate).localeCompare(String(b.nextDate)));
 
   const questRow = q => `
-    <div data-id="${q.id}" class="bg-slate-800 rounded p-3 border border-slate-600 flex items-center gap-3">
-      <span class="drag-handle text-slate-500 hover:text-slate-300" title="Drag to reorder"><i class="fa-solid fa-grip-vertical"></i></span>
-      <button onclick="completeQuest('${q.id}')" class="text-emerald-400 text-xl hover:text-emerald-300"><i class="fa-regular fa-circle"></i></button>
-      ${prioritySelectInline(q)}
-      <div class="flex-1 min-w-0 cursor-pointer" onclick="openQuest('${q.id}')">
-        <div class="font-semibold break-words">${escapeHtml(q.title)} <i class="fa-solid fa-pen text-xs text-slate-500 ml-1"></i></div>
-        ${q.note ? `<div class="text-xs text-slate-400 italic break-words">${escapeHtml(q.note)}</div>` : ''}
-        <div class="text-xs text-slate-400">Due: ${q.dueDate || '—'} — Created: ${q.createdDate}</div>
+    <div data-id="${q.id}" class="bg-slate-800 rounded p-3 border border-slate-600 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+      <div class="flex items-start gap-2 min-w-0 flex-1">
+        <span class="drag-handle shrink-0 mt-1 text-slate-500 hover:text-slate-300" title="Drag to reorder"><i class="fa-solid fa-grip-vertical"></i></span>
+        <button onclick="completeQuest('${q.id}')" class="shrink-0 text-emerald-400 text-xl leading-none hover:text-emerald-300"><i class="fa-regular fa-circle"></i></button>
+        <div class="min-w-0 flex-1">
+          <div class="flex flex-wrap items-center gap-2">
+            ${prioritySelectInline(q)}
+            <span class="font-semibold break-words min-w-0 cursor-pointer" onclick="openQuest('${q.id}')">${escapeHtml(q.title)} <i class="fa-solid fa-pen text-xs text-slate-500 ml-1"></i></span>
+          </div>
+          ${q.note ? `<div class="text-xs text-slate-400 italic break-words mt-0.5">${escapeHtml(q.note)}</div>` : ''}
+          <div class="text-xs text-slate-400 mt-0.5">
+            <span class="whitespace-nowrap">Due: ${q.dueDate || '—'}</span>
+            <span class="text-slate-600 mx-1">·</span>
+            <span class="whitespace-nowrap">Created: ${q.createdDate}</span>
+          </div>
+        </div>
       </div>
-      <span class="text-amber-400 text-sm font-bold">+${q.xp} XP</span>
-      ${q.gems ? `<span class="text-cyan-300 text-sm font-bold"><i class="fa-solid fa-gem"></i> ${q.gems}</span>` : ''}
-      <button onclick="duplicateQuest('${q.id}')" class="text-slate-400 hover:text-slate-200" title="Duplicate"><i class="fa-solid fa-copy"></i></button>
-      <button onclick="deleteQuest('${q.id}')" class="text-red-400 hover:text-red-300"><i class="fa-solid fa-trash"></i></button>
+      <div class="flex shrink-0 items-center gap-3 self-end sm:self-auto">
+        <span class="text-amber-400 text-sm font-bold whitespace-nowrap">+${q.xp} XP</span>
+        ${q.gems ? `<span class="text-cyan-300 text-sm font-bold whitespace-nowrap"><i class="fa-solid fa-gem"></i> ${q.gems}</span>` : ''}
+        <button onclick="duplicateQuest('${q.id}')" class="shrink-0 w-9 h-9 text-slate-400 hover:text-slate-200" title="Duplicate"><i class="fa-solid fa-copy"></i></button>
+        <button onclick="deleteQuest('${q.id}')" class="shrink-0 w-9 h-9 text-red-400 hover:text-red-300"><i class="fa-solid fa-trash"></i></button>
+      </div>
     </div>`;
 
   const recurRow = q => `
-    <div class="bg-slate-800 rounded p-3 border border-slate-600 flex items-center gap-3">
-      <button onclick="completeRecurring('${q.id}')" class="text-emerald-400 text-xl hover:text-emerald-300" title="Mark done — schedules the next one"><i class="fa-regular fa-circle"></i></button>
-      <div class="flex-1 min-w-0 cursor-pointer" onclick="openQuest('${q.id}')">
-        <div class="font-semibold break-words">${escapeHtml(q.title)} <i class="fa-solid fa-pen text-xs text-slate-500 ml-1"></i></div>
-        ${q.note ? `<div class="text-xs text-slate-400 italic break-words">${escapeHtml(q.note)}</div>` : ''}
-        <div class="text-xs">
-          <span class="${dueClass(q.nextDate)} font-bold"><i class="fa-solid fa-rotate"></i> ${q.nextDate} (${dueText(q.nextDate)})</span>
-          <span class="text-slate-500"> — ${intervalText(q)}${(q.history||[]).length ? ` — last done ${q.history[q.history.length-1]}` : ''}</span>
+    <div class="bg-slate-800 rounded p-3 border border-slate-600 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+      <div class="flex items-start gap-2 min-w-0 flex-1">
+        <button onclick="completeRecurring('${q.id}')" class="shrink-0 text-emerald-400 text-xl leading-none hover:text-emerald-300" title="Mark done — schedules the next one"><i class="fa-regular fa-circle"></i></button>
+        <div class="min-w-0 flex-1 cursor-pointer" onclick="openQuest('${q.id}')">
+          <div class="font-semibold break-words">${escapeHtml(q.title)} <i class="fa-solid fa-pen text-xs text-slate-500 ml-1"></i></div>
+          ${q.note ? `<div class="text-xs text-slate-400 italic break-words">${escapeHtml(q.note)}</div>` : ''}
+          <div class="text-xs mt-0.5">
+            <span class="${dueClass(q.nextDate)} font-bold whitespace-nowrap"><i class="fa-solid fa-rotate"></i> ${q.nextDate} (${dueText(q.nextDate)})</span>
+            <span class="text-slate-500 block sm:inline">${intervalText(q)}${(q.history||[]).length ? ` — last done ${q.history[q.history.length-1]}` : ''}</span>
+          </div>
         </div>
       </div>
-      ${q.xp ? `<span class="text-amber-400 text-sm font-bold">+${q.xp} XP</span>` : ''}
-      ${q.gems ? `<span class="text-cyan-300 text-sm font-bold"><i class="fa-solid fa-gem"></i> ${q.gems}</span>` : ''}
-      <button onclick="skipRecurring('${q.id}')" class="text-slate-400 hover:text-slate-200" title="Skip this one (no reward)"><i class="fa-solid fa-forward"></i></button>
-      <button onclick="deleteQuest('${q.id}')" class="text-red-400 hover:text-red-300"><i class="fa-solid fa-trash"></i></button>
+      <div class="flex shrink-0 items-center gap-3 self-end sm:self-auto">
+        ${q.xp ? `<span class="text-amber-400 text-sm font-bold whitespace-nowrap">+${q.xp} XP</span>` : ''}
+        ${q.gems ? `<span class="text-cyan-300 text-sm font-bold whitespace-nowrap"><i class="fa-solid fa-gem"></i> ${q.gems}</span>` : ''}
+        <button onclick="skipRecurring('${q.id}')" class="shrink-0 w-9 h-9 text-slate-400 hover:text-slate-200" title="Skip this one (no reward)"><i class="fa-solid fa-forward"></i></button>
+        <button onclick="deleteQuest('${q.id}')" class="shrink-0 w-9 h-9 text-red-400 hover:text-red-300"><i class="fa-solid fa-trash"></i></button>
+      </div>
     </div>`;
 
   const mainRows = sortByPriority(active.filter(q => (q.kind || 'main') === 'main')).map(questRow).join('') || '<p class="text-slate-500 text-sm">No main quests.</p>';
@@ -501,9 +541,9 @@ function openQuestForm() {
         <textarea id="nqNote" class="w-full bg-slate-700 rounded px-2 py-1 h-20" placeholder="Optional description"></textarea></div>
       <div class="grid grid-cols-2 gap-3">
         <div><label class="text-xs text-slate-400 block mb-1">XP Reward</label>
-          <input id="nqXp" type="number" value="50" class="w-full bg-slate-700 rounded px-2 py-1"></div>
+          <input id="nqXp" type="number" value="${defaultReward('main').xp}" oninput="nqXpTouched=true" class="w-full bg-slate-700 rounded px-2 py-1"></div>
         <div><label class="text-xs text-slate-400 block mb-1"><i class="fa-solid fa-gem text-cyan-300"></i> Gems Reward</label>
-          <input id="nqGems" type="number" value="50" class="w-full bg-slate-700 rounded px-2 py-1"></div>
+          <input id="nqGems" type="number" value="${defaultReward('main').gems}" oninput="nqGemsTouched=true" class="w-full bg-slate-700 rounded px-2 py-1"></div>
         <div><label class="text-xs text-slate-400 block mb-1">Category</label>
           <select id="nqKind" class="w-full bg-slate-700 rounded px-2 py-1" onchange="onNewQuestKindChange()">
             <option value="main">Main Quest</option>
@@ -540,20 +580,26 @@ function openQuestForm() {
       <button onclick="createQuest()" class="bg-emerald-600 hover:bg-emerald-500 px-3 py-1 rounded text-sm">Add Quest</button>
       <button onclick="closeModal()" class="bg-slate-600 px-3 py-1 rounded text-sm">Cancel</button>
     </div>`);
+  nqXpTouched = false;
+  nqGemsTouched = false;
 }
 function onNewQuestKindChange() {
   const rec = document.getElementById('nqKind').value === 'recurring';
   document.getElementById('nqRecurWrap').classList.toggle('hidden', !rec);
   document.getElementById('nqPrioWrap').classList.toggle('hidden', rec);
   document.getElementById('nqDueWrap').classList.toggle('hidden', rec);
+  syncQuestRewardDefaults();
 }
 function createQuest() {
   const title = document.getElementById('nqTitle').value.trim();
   if (!title) { toast('Enter a title first', 'err'); return; }
   const kind = document.getElementById('nqKind').value || 'main';
   const note = document.getElementById('nqNote').value.trim();
-  const xp = parseInt(document.getElementById('nqXp').value) || 0;
-  const gems = parseInt(document.getElementById('nqGems').value) || 0;
+  const dr = defaultReward(kind);
+  const xpRaw = document.getElementById('nqXp').value.trim();
+  const gemRaw = document.getElementById('nqGems').value.trim();
+  const xp = xpRaw === '' ? dr.xp : Math.max(0, parseInt(xpRaw) || 0);
+  const gems = gemRaw === '' ? dr.gems : Math.max(0, parseInt(gemRaw) || 0);
   if (kind === 'recurring') {
     const first = document.getElementById('nqFirst').value || todayStr();
     const q = {
