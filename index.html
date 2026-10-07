@@ -44,6 +44,11 @@
     #toastWrap { left: 12px; right: 12px; bottom: 12px; align-items: stretch; }
     .toast { max-width: none; }
   }
+  /* ---- Off-days / holidays ---- */
+  .cal-off { background-image: repeating-linear-gradient(135deg, rgba(244,63,94,.08) 0 6px, transparent 6px 12px); }
+  .cal-holiday { background-color: rgba(76,5,25,.55) !important; }
+  .cal-workday { box-shadow: inset 0 0 0 1px rgba(250,204,21,.55); }
+  .hol-badge { border: 1px dashed; background: rgba(15,23,42,.6); }
 
 </style>
 </head>
@@ -125,7 +130,8 @@ const defaultState = () => ({
   shop: [],
   gems: 0,
   updatedAt: 0,
-  settings: { questTarget: 'even', trainingTarget: 'even' }
+  streakBonus: {},
+  settings: { questTarget: 'even', trainingTarget: 'even', holidays: { CN: false, JP: false, US: false } }
 });
 
 /* Migrate old backups: habits -> trainings, habitTarget -> trainingTarget, quest priority/recurrence defaults */
@@ -996,6 +1002,7 @@ function viewTraining() {
       <button onclick="openTrainingForm()" class="bg-indigo-600 hover:bg-indigo-500 px-3 py-1 rounded text-sm"><i class="fa-solid fa-plus"></i> New Training</button>
     </div>
     ${xpTargetSelector('trainingTarget')}
+    ${streakBonusBannerHtml()}
     <p class="text-xs text-slate-500 mb-2">Tip: drag the <i class="fa-solid fa-grip-vertical"></i> handle to reorder. Click a training to edit it and check past dates.</p>
     <div id="trainingList" class="space-y-2 mb-6">${rows}</div>
     <div id="calWrap"></div>`;
@@ -1028,7 +1035,7 @@ function createTraining() {
     note: document.getElementById('nhNote').value.trim(),
     xpEach: parseInt(document.getElementById('nhXp').value) || 0,
     gemsEach: parseInt(document.getElementById('nhGems').value) || 0,
-    log: {}, target: appState.settings.trainingTarget, attributes: {}
+    log: {}, target: appState.settings.trainingTarget, attributes: {}, createdDate: todayStr()
   });
   save(); closeModal(); render();
   toast(`Training "${name}" created`);
@@ -1043,6 +1050,7 @@ function toggleTrainingDate(id, date) {
   if (!h) return;
   if (h.log[date]) { delete h.log[date]; }
   else { h.log[date] = true; grantXP(h.xpEach, h.target || appState.settings.trainingTarget); grantGems(h.gemsEach); }
+  streakBonusToast(reconcileStreakBonus(date));
   save();
 }
 function deleteTraining(id) {
@@ -1144,6 +1152,91 @@ function trainingCalToggle(id, ds) {
   if (badge) badge.innerHTML = streakBadgeHtml(h);
   const on = !!h.log[ds];
   toast(on ? `"${h.name}" checked for ${ds} — ${streakOf(h)} day streak` : `"${h.name}" unchecked for ${ds}`, on ? 'ok' : 'info');
+}
+
+/* ===== PERFECT-DAY STREAK BONUS ===== */
+const STREAK_TIERS = [
+  { days: 365, bonus: 50, label: '1 year' },
+  { days: 30,  bonus: 20, label: '1 month' },
+  { days: 7,   bonus: 10, label: '7 days' },
+  { days: 3,   bonus: 5,  label: '3 days' }
+];
+function streakTierFor(n) { return STREAK_TIERS.find(t => n >= t.days) || null; }
+function nextStreakTier(n) { return STREAK_TIERS.slice().reverse().find(t => n < t.days) || null; }
+
+function trainingsRequiredOn(ds) { return appState.trainings.filter(h => !h.createdDate || h.createdDate <= ds); }
+function isPerfectDay(ds) {
+  const req = trainingsRequiredOn(ds);
+  return req.length > 0 && req.every(h => h.log && h.log[ds]);
+}
+function perfectStreakEndingAt(ds) {
+  let n = 0, cur = ds, guard = 0;
+  while (guard++ < 5000 && isPerfectDay(cur)) { n++; cur = shiftDays(cur, -1); }
+  return n;
+}
+function currentPerfectStreak() {
+  const t = todayStr();
+  return perfectStreakEndingAt(isPerfectDay(t) ? t : shiftDays(t, -1));
+}
+function lastLoggedDate() {
+  let max = '';
+  appState.trainings.forEach(h => Object.keys(h.log || {}).forEach(d => { if (h.log[d] && d > max) max = d; }));
+  return max;
+}
+function grantXPSigned(amount, target) {
+  if (amount >= 0) return grantXP(amount, target);
+  const even = target === 'even' || !target;
+  const recips = even ? appState.party : appState.party.filter(p => p.id === target);
+  if (!recips.length) return;
+  const share = even ? Math.floor(-amount / recips.length) : -amount;
+  recips.forEach(m => {
+    m.xp -= share;
+    while (m.xp < 0 && m.level > 1) { m.level--; m.xp += xpForLevel(m.level); }
+    if (m.xp < 0) m.xp = 0;
+  });
+}
+
+function reconcileStreakBonus(fromDate) {
+  appState.streakBonus = appState.streakBonus || {};
+  const ledger = appState.streakBonus;
+  let end = todayStr();
+  const ll = lastLoggedDate(); if (ll > end) end = ll;
+  Object.keys(ledger).forEach(d => { if (d > end) end = d; });
+  let streak = perfectStreakEndingAt(shiftDays(fromDate, -1));
+  let delta = 0, newest = null, d = fromDate, guard = 0;
+  while (d <= end && guard++ < 5000) {
+    streak = isPerfectDay(d) ? streak + 1 : 0;
+    const tier = streakTierFor(streak);
+    const want = tier ? tier.bonus : 0, had = ledger[d] || 0;
+    if (want !== had) {
+      delta += want - had;
+      if (want) ledger[d] = want; else delete ledger[d];
+      if (want > had) newest = { d, streak, tier };
+    }
+    d = shiftDays(d, 1);
+  }
+  if (delta) {
+    grantXPSigned(delta, appState.settings.trainingTarget);
+    appState.gems = Math.max(0, (appState.gems || 0) + delta);
+  }
+  return { delta, newest };
+}
+function streakBonusToast(res) {
+  if (!res || !res.delta) return;
+  if (res.delta > 0) toast(`Perfect streak ${res.newest ? res.newest.streak + ' days (' + res.newest.tier.label + ' tier)' : ''} — bonus +${res.delta} XP, +${res.delta} gems`, 'info');
+  else toast(`Streak bonus revoked: ${res.delta} XP, ${res.delta} gems`, 'err');
+}
+function streakBonusBannerHtml() {
+  if (!appState.trainings.length) return '';
+  const n = currentPerfectStreak(), doneToday = isPerfectDay(todayStr());
+  const tier = streakTierFor(n), next = nextStreakTier(n);
+  return `<div class="mb-3 rounded border border-yellow-500/40 bg-yellow-900/20 p-2 text-xs">
+    <div class="font-bold text-yellow-300"><i class="fa-solid fa-star"></i> Perfect-day streak: ${n} day${n === 1 ? '' : 's'}
+      ${tier ? `<span class="ml-2 text-yellow-200">+${tier.bonus} XP & gems / day</span>` : ''}</div>
+    <div class="text-slate-400 mt-0.5">
+      ${doneToday ? 'All trainings done today.' : n ? '<span class="text-amber-300">Finish every training today to keep it alive.</span>' : 'Complete every training for 3 days in a row to start earning bonuses.'}
+      ${next ? ` Next: ${next.label} → +${next.bonus}/day (${next.days - n} more day${next.days - n === 1 ? '' : 's'}).` : ' Max tier reached!'}
+    </div></div>`;
 }
 
 /* ===== SHOP ===== */
@@ -1250,11 +1343,195 @@ function buyItem(id) {
   save(); render();
   toast(`Purchased "${s.name}" for ${s.price} gems`);
 }
+/* ===== HOLIDAYS (public, keyless, CORS-enabled APIs; cached per country-year) ===== */
+const HOLIDAY_COUNTRIES = {
+  CN: { label: 'China', chip: 'bg-red-700',  badge: 'border-red-400 text-red-200' },
+  JP: { label: 'Japan', chip: 'bg-pink-700', badge: 'border-pink-400 text-pink-200' },
+  US: { label: 'USA',   chip: 'bg-blue-700', badge: 'border-blue-400 text-blue-200' }
+};
+const HOLIDAY_CACHE_KEY = 'rpg_holiday_cache_v1';
+const HOLIDAY_TTL = 30 * 86400000;
+let holidayCache = (() => { try { return JSON.parse(localStorage.getItem(HOLIDAY_CACHE_KEY)) || {}; } catch (e) { return {}; } })();
+const holidayInflight = {};
+function saveHolidayCache() { try { localStorage.setItem(HOLIDAY_CACHE_KEY, JSON.stringify(holidayCache)); } catch (e) {} }
+
+const CN_EN = { '元旦': "New Year's Day", '春节': 'Spring Festival', '清明节': 'Qingming Festival', '劳动节': 'Labour Day',
+  '端午节': 'Dragon Boat Festival', '中秋节': 'Mid-Autumn Festival', '国庆节': 'National Day', '国庆节、中秋节': 'National Day / Mid-Autumn' };
+const JP_EN = { '元日': "New Year's Day", '成人の日': 'Coming of Age Day', '建国記念の日': 'National Foundation Day',
+  '天皇誕生日': "Emperor's Birthday", '春分の日': 'Vernal Equinox Day', '昭和の日': 'Showa Day', '憲法記念日': 'Constitution Day',
+  'みどりの日': 'Greenery Day', 'こどもの日': "Children's Day", '海の日': 'Marine Day', '山の日': 'Mountain Day',
+  '敬老の日': 'Respect for the Aged Day', '秋分の日': 'Autumnal Equinox Day', 'スポーツの日': 'Sports Day',
+  '文化の日': 'Culture Day', '勤労感謝の日': 'Labour Thanksgiving Day', '国民の休日': "Citizens' Holiday" };
+function jpEnglish(n) { return n.includes('振替休日') ? 'Substitute Holiday' : (JP_EN[n] || n); }
+
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
+  return r.json();
+}
+async function fetchNager(year, cc) {
+  const data = await fetchJson(`https://date.nager.at/api/v3/PublicHolidays/${year}/${cc}`);
+  return data.filter(h => h.global !== false).map(h => ({ date: h.date, name: h.name, local: h.localName, off: true }));
+}
+function usFederalHolidays(y) {
+  const nth = (m, wd, n) => { const d = new Date(y, m, 1); return new Date(y, m, 1 + ((wd - d.getDay() + 7) % 7) + 7 * (n - 1)); };
+  const last = (m, wd) => { const d = new Date(y, m + 1, 0); d.setDate(d.getDate() - ((d.getDay() - wd + 7) % 7)); return d; };
+  const fixed = (m, dd) => { const d = new Date(y, m, dd); if (d.getDay() === 6) d.setDate(dd - 1); else if (d.getDay() === 0) d.setDate(dd + 1); return d; };
+  return [[fixed(0,1), "New Year's Day"], [nth(0,1,3), 'Martin Luther King Jr. Day'], [nth(1,1,3), "Washington's Birthday"],
+    [last(4,1), 'Memorial Day'], [fixed(5,19), 'Juneteenth'], [fixed(6,4), 'Independence Day'], [nth(8,1,1), 'Labor Day'],
+    [nth(9,1,2), 'Columbus Day'], [fixed(10,11), 'Veterans Day'], [nth(10,4,4), 'Thanksgiving Day'], [fixed(11,25), 'Christmas Day']]
+    .map(([d, name]) => ({ date: fmtDate(d), name, local: name, off: true }));
+}
+const HOLIDAY_SOURCES = {
+  CN: [
+    async y => {
+      const d = await fetchJson(`https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/${y}.json`);
+      if (!d.days || !d.days.length) throw new Error('no CN data yet');
+      return d.days.map(x => ({ date: x.date, name: (CN_EN[x.name] || x.name) + (x.isOffDay ? '' : ' (make-up workday)'),
+                                local: x.isOffDay ? x.name : x.name + ' 补班', off: !!x.isOffDay }));
+    },
+    y => fetchNager(y, 'CN')
+  ],
+  JP: [
+    async y => Object.entries(await fetchJson(`https://holidays-jp.github.io/api/v1/${y}/date.json`))
+                     .map(([date, n]) => ({ date, name: jpEnglish(n), local: n, off: true })),
+    y => fetchNager(y, 'JP')
+  ],
+  US: [ y => fetchNager(y, 'US'), async y => usFederalHolidays(y) ]
+};
+
+function enabledHolidayCountries() {
+  const h = appState.settings.holidays || {};
+  return Object.keys(HOLIDAY_COUNTRIES).filter(cc => h[cc]);
+}
+function ensureHolidays(cc, year) {
+  const key = `${cc}-${year}`, cached = holidayCache[key];
+  if ((cached && Date.now() - cached.at < HOLIDAY_TTL) || holidayInflight[key]) return;
+  holidayInflight[key] = true;
+  (async () => {
+    for (const src of HOLIDAY_SOURCES[cc]) {
+      try {
+        const days = await src(year);
+        if (!Array.isArray(days)) throw new Error('bad payload');
+        holidayCache[key] = { at: Date.now(), days };
+        saveHolidayCache(); delete holidayInflight[key]; redrawCal();
+        return;
+      } catch (e) { console.warn(`holiday source failed (${key})`, e); }
+    }
+    if (!cached) toast(`Couldn't load ${HOLIDAY_COUNTRIES[cc].label} holidays for ${year}`, 'err');
+    setTimeout(() => { delete holidayInflight[key]; }, 5 * 60000);
+    redrawCal();
+  })();
+}
+function toggleHolidayCountry(cc) {
+  appState.settings.holidays = Object.assign({}, appState.settings.holidays);
+  appState.settings.holidays[cc] = !appState.settings.holidays[cc];
+  save(); redrawCal();
+  toast(`${HOLIDAY_COUNTRIES[cc].label} holidays ${appState.settings.holidays[cc] ? 'shown' : 'hidden'}`, 'info');
+}
+function holidaysOn(ds) {
+  const y = ds.slice(0, 4), out = [];
+  enabledHolidayCountries().forEach(cc => {
+    const c = holidayCache[`${cc}-${y}`];
+    if (c) c.days.forEach(h => { if (h.date === ds) out.push(Object.assign({ cc }, h)); });
+  });
+  return out;
+}
+function dayStatus(ds) {
+  const hs = holidaysOn(ds), dow = parseDate(ds).getDay();
+  const weekend = dow === 0 || dow === 6;
+  const holidayOff = hs.some(h => h.off), makeupWork = hs.some(h => !h.off) && !holidayOff;
+  return { hs, weekend, holidayOff, makeupWork, off: holidayOff || (weekend && !makeupWork) };
+}
+function holidayToggleChips(year) {
+  return Object.entries(HOLIDAY_COUNTRIES).map(([cc, c]) => {
+    const on = !!(appState.settings.holidays || {})[cc];
+    const loading = on && holidayInflight[`${cc}-${year}`] && !holidayCache[`${cc}-${year}`];
+    return `<button onclick="toggleHolidayCountry('${cc}')" title="Show ${c.label} holidays"
+      class="px-2 py-0.5 rounded font-bold border ${on ? c.chip + ' border-transparent text-white' : 'bg-slate-800 border-slate-600 text-slate-500 hover:text-slate-200'}">
+      <i class="fa-solid fa-${loading ? 'spinner fa-spin' : on ? 'eye' : 'eye-slash'}"></i> ${cc}</button>`;
+  }).join('');
+}
+function dayDetailHolidayHtml(ds) {
+  const st = dayStatus(ds), sb = (appState.streakBonus || {})[ds];
+  const rows = st.hs.map(h => { const c = HOLIDAY_COUNTRIES[h.cc]; return `<div class="hol-badge rounded px-2 py-1 mb-1 text-sm ${c.badge}">
+      <b>${c.label}</b>: ${escapeHtml(h.name)}${h.local && h.local !== h.name ? ` <span class="opacity-70">${escapeHtml(h.local)}</span>` : ''}</div>`; }).join('');
+  const tag = st.off ? `<span class="text-rose-300 font-bold"><i class="fa-solid fa-mug-hot"></i> Off-day${st.holidayOff ? ' (holiday)' : ' (weekend)'}</span>`
+            : st.makeupWork ? `<span class="text-yellow-300 font-bold"><i class="fa-solid fa-briefcase"></i> Make-up workday</span>` : '';
+  const bonus = sb ? `<span class="text-yellow-300 ml-2"><i class="fa-solid fa-star"></i> Streak bonus +${sb}</span>` : '';
+  return (tag || bonus || rows) ? `<div class="mb-4 text-xs">${tag}${bonus}<div class="mt-1">${rows}</div></div>` : '';
+}
+
+let lastCalContext = 'quests';
+function redrawCal() { const w = document.getElementById('calWrap'); if (w) drawSharedCal(w, lastCalContext); }
 
 /* ===== SHARED CALENDAR ===== */
 let sharedCalMonth = new Date();
 function mountCalendar(context) { const wrap = document.getElementById('calWrap'); if (!wrap) return; drawSharedCal(wrap, context); }
 function drawSharedCal(wrap, context) {
+  lastCalContext = context;
+  const y = sharedCalMonth.getFullYear(), mo = sharedCalMonth.getMonth();
+  enabledHolidayCountries().forEach(cc => ensureHolidays(cc, y));
+  const first = new Date(y, mo, 1).getDay();
+  const days = new Date(y, mo+1, 0).getDate();
+  const monthName = sharedCalMonth.toLocaleString('default',{month:'long',year:'numeric'});
+  const normal = appState.quests.filter(q => q.kind !== 'recurring');
+  let cells = '';
+  for (let i=0;i<first;i++) cells += '<div class="cal-cell"></div>';
+  for (let d=1; d<=days; d++) {
+    const ds = `${y}-${String(mo+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const st = dayStatus(ds);
+    const dueQuests = normal.filter(q => q.dueDate && q.dueDate === ds);
+    const createdOnly = normal.filter(q => !q.dueDate && q.createdDate === ds);
+    const recurDue = appState.quests.filter(q => q.kind === 'recurring' && q.nextDate === ds);
+    const trainingsDone = appState.trainings.filter(h => h.log[ds]);
+    const sb = (appState.streakBonus || {})[ds];
+    let badges = '';
+    st.hs.forEach(h => { const c = HOLIDAY_COUNTRIES[h.cc];
+      badges += `<div class="hol-badge text-[10px] truncate rounded px-1 mb-0.5 ${c.badge}" title="${escapeAttr(c.label + ': ' + h.name + (h.local && h.local !== h.name ? ' / ' + h.local : ''))}"><b>${h.cc}</b> ${h.off ? '' : '<i class="fa-solid fa-briefcase"></i> '}${escapeHtml(h.name)}</div>`; });
+    createdOnly.forEach(q => badges += `<div class="text-[10px] truncate bg-sky-600/80 rounded px-1 mb-0.5" title="Created: ${escapeAttr(q.title)}"><i class="fa-solid fa-plus"></i> ${escapeHtml(q.title)}</div>`);
+    dueQuests.forEach(q => badges += `<div class="text-[10px] truncate bg-rose-600/80 rounded px-1 mb-0.5" title="Due: ${escapeAttr(q.title)}"><i class="fa-solid fa-flag"></i> ${escapeHtml(q.title)}</div>`);
+    recurDue.forEach(q => badges += `<div class="text-[10px] truncate bg-purple-600/80 rounded px-1 mb-0.5" title="Recurring: ${escapeAttr(q.title)}"><i class="fa-solid fa-rotate"></i> ${escapeHtml(q.title)}</div>`);
+    if (trainingsDone.length || sb) badges += `<div class="text-[10px] text-emerald-400">${trainingsDone.length ? `<i class="fa-solid fa-fire"></i> ${trainingsDone.length} training${trainingsDone.length>1?'s':''}` : ''}${sb ? ` <span class="text-yellow-300" title="Perfect-day streak bonus"><i class="fa-solid fa-star"></i>+${sb}</span>` : ''}</div>`;
+    const isToday = ds === todayStr();
+    const cellCls = ['cal-cell cursor-pointer rounded border p-1 overflow-hidden',
+      isToday ? 'border-indigo-400' : st.holidayOff ? 'border-rose-800' : 'border-slate-700',
+      st.off ? 'bg-slate-900 hover:bg-slate-800 cal-off' : 'bg-slate-800 hover:bg-slate-700',
+      st.holidayOff ? 'cal-holiday' : '', st.makeupWork ? 'cal-workday' : ''].join(' ');
+    const numCls = isToday ? 'text-indigo-300' : st.off ? 'text-rose-300' : 'text-slate-400';
+    const tag = st.makeupWork ? '<span class="text-[9px] font-bold text-yellow-300">WORK</span>'
+              : st.off ? '<span class="text-[9px] font-bold text-rose-400/80">OFF</span>' : '';
+    cells += `<div onclick="openDayDetail('${ds}')" class="${cellCls}">
+      <div class="flex items-center justify-between"><span class="text-xs font-bold ${numCls}">${d}</span>${tag}</div>${badges}</div>`;
+  }
+  wrap.innerHTML = `
+    <div class="mt-6 mb-2 flex items-center justify-between">
+      <h3 class="font-bold text-lg"><i class="fa-solid fa-calendar-days"></i> Calendar</h3>
+      <div class="flex items-center gap-2">
+        <button onclick="sharedCalMonth.setMonth(sharedCalMonth.getMonth()-1);drawSharedCal(document.getElementById('calWrap'),'${context}')" class="px-2 bg-slate-700 rounded">&lt;</button>
+        <span class="font-bold text-sm">${monthName}</span>
+        <button onclick="sharedCalMonth.setMonth(sharedCalMonth.getMonth()+1);drawSharedCal(document.getElementById('calWrap'),'${context}')" class="px-2 bg-slate-700 rounded">&gt;</button>
+      </div>
+    </div>
+    <div class="flex items-center gap-2 mb-2 flex-wrap text-[11px]">
+      <span class="text-slate-400"><i class="fa-solid fa-umbrella-beach"></i> Holidays:</span>${holidayToggleChips(y)}
+    </div>
+    <div class="flex gap-3 text-[11px] mb-1 text-slate-400 flex-wrap">
+      <span><span class="inline-block w-3 h-3 bg-sky-600 rounded-sm"></span> Created</span>
+      <span><span class="inline-block w-3 h-3 bg-rose-600 rounded-sm"></span> Due</span>
+      <span><span class="inline-block w-3 h-3 bg-purple-600 rounded-sm"></span> Recurring</span>
+      <span><i class="fa-solid fa-fire text-emerald-400"></i> Training done</span>
+      <span><i class="fa-solid fa-star text-yellow-300"></i> Streak bonus</span>
+      <span><span class="inline-block w-3 h-3 rounded-sm hol-badge border-slate-300"></span> Holiday</span>
+      <span><span class="inline-block w-3 h-3 rounded-sm bg-slate-900 cal-off border border-slate-600"></span> Off-day</span>
+      <span><span class="inline-block w-3 h-3 rounded-sm cal-workday"></span> Make-up workday</span>
+    </div>
+    <div class="grid grid-cols-7 gap-1 text-center text-xs text-slate-400 mb-1">
+      <div class="text-rose-300/80">Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div class="text-rose-300/80">Sat</div></div>
+    <div class="grid grid-cols-7 gap-1">${cells}</div>`;
+}
+
+function drawSharedCal_OLD(wrap, context) {
   const y = sharedCalMonth.getFullYear(), mo = sharedCalMonth.getMonth();
   const first = new Date(y, mo, 1).getDay();
   const days = new Date(y, mo+1, 0).getDate();
@@ -1332,6 +1609,7 @@ function renderDayDetail() {
   openModal(`
     <h3 class="text-xl font-bold mb-1"><i class="fa-solid fa-calendar-day"></i> ${ds}</h3>
     <p class="text-xs text-slate-400 mb-4">Tick to edit completion. Click a name to open its full editable details.</p>
+    ${dayDetailHolidayHtml(ds)}
     <h4 class="font-bold text-sky-300 mb-1">Quests</h4>
     <div class="mb-4 text-sm">${questRows}</div>
     ${recurToday.length ? `<h4 class="font-bold text-purple-300 mb-1">Recurring due</h4><div class="mb-4 text-sm">${recurRows}</div>` : ''}
@@ -1372,8 +1650,10 @@ function setTrainingDone(id, ds, checked) {
   const currently = !!h.log[ds];
   if (checked && !currently) { h.log[ds] = true; grantXP(h.xpEach, h.target || 'even'); grantGems(h.gemsEach); toast(`"${h.name}" checked for ${ds} — +${h.xpEach} XP`); }
   else if (!checked && currently) { delete h.log[ds]; toast(`"${h.name}" unchecked for ${ds}`, 'info'); }
+  streakBonusToast(reconcileStreakBonus(ds));
   save();
 }
+
 function setAllTrainings(ds, checked) {
   let n = 0;
   appState.trainings.forEach(h => {
@@ -1381,9 +1661,11 @@ function setAllTrainings(ds, checked) {
     if (checked && !currently) { h.log[ds] = true; grantXP(h.xpEach, h.target || 'even'); grantGems(h.gemsEach); n++; }
     else if (!checked && currently) { delete h.log[ds]; n++; }
   });
+  streakBonusToast(reconcileStreakBonus(ds));
   save(); renderDayDetail();
   toast(`${checked ? 'Checked' : 'Unchecked'} ${n} training${n === 1 ? '' : 's'} for ${ds}`, checked ? 'ok' : 'info');
 }
+
 
 /* ===== DUPLICATE ===== */
 function duplicateQuest(id) {
@@ -1403,7 +1685,7 @@ function duplicateQuest(id) {
 function duplicateTraining(id) {
   const h = appState.trainings.find(x => x.id === id);
   if (!h) return;
-  appState.trainings.push({ id: uid(), name: h.name + ' (copy)', note: h.note || '', xpEach: h.xpEach || 0, gemsEach: h.gemsEach || 0, log: {}, target: h.target || appState.settings.trainingTarget, attributes: JSON.parse(JSON.stringify(h.attributes || {})) });
+  appState.trainings.push({ id: uid(), name: h.name + ' (copy)', note: h.note || '', xpEach: h.xpEach || 0, gemsEach: h.gemsEach || 0, log: {}, target: h.target || appState.settings.trainingTarget, attributes: JSON.parse(JSON.stringify(h.attributes || {})), createdDate: todayStr() });
   save(); closeModal(); render();
   toast(`Duplicated training "${h.name}"`);
 }
